@@ -1,4 +1,6 @@
 // game.js — фикс: явный сброс скорости/флагов при рестарте + защита от отрицательной скорости при беге
+// + улучшенная и более надёжная логика показа ending.mp4 (fix for GH Pages zoom/crop issues)
+
 const FRAME_W = 960;
 const FRAME_H = 960;
 
@@ -72,7 +74,6 @@ let endingOverlay = null;
 let restartPrompt = null;
 let restartMode = false;
 let endingPlayButton = null;
-let endingUnmuteButton = null;
 
 let scarecrows;
 let activeScarecrow = null;
@@ -127,7 +128,7 @@ let soundVolumes = {
 function preload() {
     this.load.spritesheet('princess_run', 'assets/princess_run.png', { frameWidth: PR_RUN_FRAME_W, frameHeight: PR_RUN_FRAME_H });
     this.load.spritesheet('zombie_walk', 'assets/zombie_walk.png', { frameWidth: FRAME_W, frameHeight: FRAME_H });
-    this.load.spritesheet('princess_carry_anim', 'assets/princess_carry.png', { frameWidth: FRAME_W, frameHeight: PR_RUN_FRAME_H });
+    this.load.spritesheet('princess_carry_anim', 'assets/princess_carry.png', { frameWidth: FRAME_W, frameHeight: FRAME_H });
     this.load.spritesheet('big_zombie_walk', 'assets/big_zombie_walk.png', { frameWidth: FRAME_W, frameHeight: FRAME_H });
 
     this.load.spritesheet('princess_attack', 'assets/princess_attack.png', { frameWidth: 644, frameHeight: 960 });
@@ -157,6 +158,7 @@ function preload() {
     this.load.audio('s_dash', 'assets/dash.wav');
 
     // ending video
+    // *** FIX: добавил third param 'canplaythrough' как раньше, оставил mp4 — важно чтобы файл действительно был в assets и доступен.
     this.load.video('ending', 'assets/ending.mp4', 'canplaythrough');
 }
 
@@ -581,231 +583,157 @@ function startFinalRun() {
     princess.setVelocityX(Math.abs(Math.max(BASE_PLAYER_SPEED, 220)));
 }
 
-// --- ending cutscene (улучшенная и более надёжная логика автоплея и масштабирования) ---
+// --- ending cutscene (robustified) ---
+// *** FIX: improved/resilient layout for video on GH Pages / different browsers
 function startEndingCutscene() {
     cutscenePlaying = true; stopCamera = true; generateGround = false;
     try { this.physics.world.pause(); } catch (e) {}
     try { if (sounds.theme && sounds.theme.isPlaying) sounds.theme.stop(); } catch (e) {}
     const w = this.sys.game.config.width; const h = this.sys.game.config.height;
     try { if (endingPlayButton) { endingPlayButton.destroy(); endingPlayButton = null; } } catch (e) {}
-    try { if (endingUnmuteButton) { endingUnmuteButton.destroy(); endingUnmuteButton = null; } } catch (e) {}
+    // create Phaser video object
+    endingVideo = this.add.video(w/2, h/2, 'ending').setScrollFactor(0).setDepth(1001);
+    endingVideo.setOrigin(0.5, 0.5); // *** FIX: ensure origin is centered
 
-    // создаём Phaser.Video (Phaser сам вставит нативный элемент)
-    endingVideo = this.add.video(w/2, h/2, 'ending').setScrollFactor(0).setDepth(1001).setOrigin(0.5, 0.5);
-    endingVideo.setVisible(true);
-
-    // Попытка получить нативный video-элемент
+    // Ensure underlying HTMLVideoElement is accessible and more robustly handled
     let nativeVideo = null;
-    try { nativeVideo = endingVideo.video; } catch (e) { nativeVideo = null; }
+    try { nativeVideo = endingVideo.video || null; } catch(e){ nativeVideo = null; }
 
-    // временный затемняющий overlay пока считаем размеры
+    // *** FIX: try to allow crossOrigin (some GH Pages setups may need it to read metadata)
+    try {
+        if (nativeVideo) {
+            try { nativeVideo.crossOrigin = 'anonymous'; } catch(e) {}
+            // don't force muted here; we'll manage it when playing
+        }
+    } catch(e){}
+
+    // overlay while we compute layout
     const tempOverlay = this.add.rectangle(0,0,w,h,0x000000,0.85).setOrigin(0,0).setScrollFactor(0).setDepth(1000);
 
-    // Определяем finalize — высчитывает size и выставляет displaySize, не использует абсолютное left/top
     const finalizeVideoLayout = () => {
-        try {
-            let vidW = 1280, vidH = 720;
-            try {
-                if (nativeVideo && nativeVideo.videoWidth && nativeVideo.videoHeight) {
-                    vidW = nativeVideo.videoWidth;
-                    vidH = nativeVideo.videoHeight;
-                } else if (endingVideo && endingVideo.width && endingVideo.height) {
-                    vidW = endingVideo.width || vidW; vidH = endingVideo.height || vidH;
-                }
-            } catch (e) {}
-
-            if (!vidW || !vidH) { vidW = 1280; vidH = 720; }
-
-            const scale = Math.min(w / vidW, h / vidH);
-            const displayW = Math.round(vidW * scale);
-            const displayH = Math.round(vidH * scale);
-
-            try { endingVideo.setDisplaySize(displayW, displayH); } catch (e) {}
-            try { endingVideo.setPosition(w / 2, h / 2); } catch (e) {}
-
-            try { if (endingLeftBar) endingLeftBar.destroy(); } catch (e) {}
-            try { if (endingRightBar) endingRightBar.destroy(); } catch (e) {}
-
-            const pad = Math.max(0, Math.round((w - displayW) / 2));
-            if (pad > 0) {
-                endingLeftBar = this.add.rectangle(0, 0, pad, h, 0x000000, 1).setOrigin(0, 0).setScrollFactor(0).setDepth(1000);
-                endingRightBar = this.add.rectangle(w - pad, 0, pad, h, 0x000000, 1).setOrigin(0, 0).setScrollFactor(0).setDepth(1000);
-            } else { endingLeftBar = null; endingRightBar = null; }
-
-            // применяем object-fit: contain и размеры (без left/top), чтобы не поломать позиции при масштабировании canvas
-            try {
-                if (nativeVideo && nativeVideo.style) {
-                    nativeVideo.style.objectFit = 'contain';
-                    nativeVideo.style.width = displayW + 'px';
-                    nativeVideo.style.height = displayH + 'px';
-                    // не трогаем position/left/top — Phaser нормально позиционирует natively
-                    nativeVideo.style.zIndex = 1001;
-                    // playsinline поможет на мобильных
-                    nativeVideo.setAttribute && nativeVideo.setAttribute('playsinline', '');
-                    nativeVideo.playsInline = true;
-                }
-            } catch (e) { /* not critical */ }
-
-            try { if (tempOverlay && tempOverlay.destroy) tempOverlay.destroy(); } catch (e) {}
-        } catch (e) {
-            console.warn('finalizeVideoLayout error', e);
-        }
-    };
-
-    // обработчики окончания
-    function onNativeEndedWrapper() { onEndingVideoComplete.call(this); }
-    function onNativeEndedWrapperOnce() { onEndingVideoComplete.call(this); }
-
-    // если нативный элемент есть — сперва попытаемся включить muted autoplay (это часто проходит в браузерах)
-    const tryAutoplayMuted = async () => {
+        // compute video native size robustly with fallbacks
+        let vidW = 1072, vidH = 720; // safe defaults (original design)
         try {
             if (nativeVideo) {
-                try { nativeVideo.muted = true; } catch (e) {}
-                try { nativeVideo.volume = 0; } catch(e){}
-            }
-            // play только после того как метаданные загружены и finalize сделан
-            let playPromise = null;
-            try { playPromise = endingVideo.play(false); } catch (e) { playPromise = null; }
-            if (playPromise && typeof playPromise.then === 'function') {
-                await playPromise;
-                console.info('endingVideo autoplay (muted) succeeded');
-                this.input.enabled = false;
-                // показываем кнопку unmute (чтобы вернуть звук по желанию)
-                createEndingUnmuteButton.call(this);
-                return true;
-            } else {
-                // если play не вернул промис — проверим paused
-                if (nativeVideo && nativeVideo.paused === false) {
-                    this.input.enabled = false;
-                    createEndingUnmuteButton.call(this);
-                    return true;
+                if (nativeVideo.videoWidth && nativeVideo.videoHeight) {
+                    vidW = nativeVideo.videoWidth;
+                    vidH = nativeVideo.videoHeight;
+                } else if (nativeVideo.width && nativeVideo.height) {
+                    vidW = nativeVideo.width;
+                    vidH = nativeVideo.height;
                 }
             }
-        } catch (e) {
-            console.info('muted autoplay failed', e);
-            return false;
+        } catch(e){}
+
+        // compute maximum allowed display area (leave small padding)
+        const padX = 20; const padY = 20;
+        const maxW = Math.max(1, w - padX * 2);
+        const maxH = Math.max(1, h - padY * 2);
+
+        // *** FIX: avoid upscaling beyond native video size (prevents "zoom in" effect)
+        const scale = Math.min(maxW / vidW, maxH / vidH, 1);
+
+        const displayW = Math.round(vidW * scale);
+        const displayH = Math.round(vidH * scale);
+
+        // apply display size and center
+        try {
+            endingVideo.setDisplaySize(displayW, displayH);
+            endingVideo.setPosition(w/2, h/2);
+            endingVideo.setOrigin(0.5, 0.5);
+        } catch(e){ console.warn('setDisplaySize failed', e); }
+
+        // create black side bars if needed
+        try { if (endingLeftBar) endingLeftBar.destroy(); } catch(e){}
+        try { if (endingRightBar) endingRightBar.destroy(); } catch(e){}
+        const pad = Math.max(0, Math.round((w - displayW)/2));
+        if (pad > 0) {
+            endingLeftBar = this.add.rectangle(0,0,pad,h,0x000000,1).setOrigin(0,0).setScrollFactor(0).setDepth(1000);
+            endingRightBar = this.add.rectangle(w - pad, 0, pad, h, 0x000000, 1).setOrigin(0,0).setScrollFactor(0).setDepth(1000);
         }
-        return false;
+
+        try { tempOverlay.destroy(); } catch(e){}
+        let playPromise = null;
+        try { playPromise = endingVideo.play(false); } catch(e) { playPromise = null; }
+
+        // If autoplay allowed and playing begins — disable input.
+        if (playPromise && typeof playPromise.then === 'function') {
+            playPromise.then(()=>{ this.input.enabled = false; }).catch(()=>{ createEndingPlayButton.call(this, displayW, displayH); });
+        } else {
+            // if native video shows as paused, show play button; else try to lock input
+            try {
+                if (nativeVideo && nativeVideo.paused) createEndingPlayButton.call(this, displayW, displayH);
+                else this.input.enabled = false;
+            } catch(e) { createEndingPlayButton.call(this, displayW, displayH); }
+        }
+
+        // listen for video end both on Phaser and native element
+        try { endingVideo.off('complete'); endingVideo.on('complete', ()=>{ onEndingVideoComplete.call(this); }); } catch(e){}
+        try {
+            if (nativeVideo && nativeVideo.addEventListener) {
+                // remove possible previous to avoid duplicates
+                try { nativeVideo.removeEventListener('ended', onEndingVideoCompleteWrapper); } catch(e){}
+                nativeVideo.addEventListener('ended', onEndingVideoCompleteWrapperOnce.bind(this), { once: true });
+            }
+        } catch(e){}
     };
 
-    // Функция показа кнопки play (если autoplay заблокирован)
-    const showPlayButton = () => {
-        // определяем displayW/displayH для позиционирования кнопки (попытка получить текущие размеры)
-        let displayW = endingVideo.displayWidth || Math.min(w, 1280);
-        let displayH = endingVideo.displayHeight || Math.min(h, 720);
-        createEndingPlayButton.call(this, displayW, displayH);
-    };
+    function onEndingVideoCompleteWrapper(){}
+    function onEndingVideoCompleteWrapperOnce(){ onEndingVideoComplete.call(this); }
 
-    // Если есть nativeVideo и метаданные готовы — finalize и пробуем автоплей. Иначе ждём loadedmetadata.
+    // If metadata available now — finalize; otherwise wait for loadedmetadata and use timeout fallback
     try {
         if (nativeVideo && nativeVideo.readyState >= 1 && nativeVideo.videoWidth && nativeVideo.videoHeight) {
             finalizeVideoLayout.call(this);
-            // попробуем muted autoplay
-            tryAutoplayMuted.call(this).then((ok) => { if (!ok) showPlayButton(); });
         } else if (nativeVideo && nativeVideo.addEventListener) {
-            nativeVideo.addEventListener('loadedmetadata', () => {
-                finalizeVideoLayout.call(this);
-                tryAutoplayMuted.call(this).then((ok) => { if (!ok) showPlayButton(); });
-            }, { once: true });
-            // запасной таймаут если событие не пришло
-            this.time.delayedCall(600, () => {
-                try { finalizeVideoLayout.call(this); } catch (e) {}
-                tryAutoplayMuted.call(this).then((ok) => { if (!ok) showPlayButton(); });
-            });
+            nativeVideo.addEventListener('loadedmetadata', ()=>{ try { finalizeVideoLayout.call(this); } catch(e){ finalizeVideoLayout.call(this); } }, { once: true });
+            // fallback: if metadata doesn't fire quickly, try again shortly
+            this.time.delayedCall(600, ()=>{ try { if (endingVideo && endingVideo.video && endingVideo.video.videoWidth) finalizeVideoLayout.call(this); } catch(e){ finalizeVideoLayout.call(this); } });
         } else {
-            // fallback
-            this.time.delayedCall(150, () => {
-                finalizeVideoLayout.call(this);
-                tryAutoplayMuted.call(this).then((ok) => { if (!ok) showPlayButton(); });
-            });
+            // no native video element accessible — just finalize with defaults after short delay
+            this.time.delayedCall(100, ()=> finalizeVideoLayout.call(this));
         }
-    } catch (e) {
-        console.warn('ending video setup error', e);
-        // на всякий случай покажем кнопку
-        this.time.delayedCall(100, () => showPlayButton());
+    } catch(e){
+        // last resort
+        this.time.delayedCall(100, ()=> finalizeVideoLayout.call(this));
     }
-
-    // Обработчик ресайза — пересчитывает layout
-    try {
-        if (this._endingResizeHandler) {
-            try { this.scale.off('resize', this._endingResizeHandler); } catch (e) {}
-        }
-        this._endingResizeHandler = () => {
-            try {
-                // обновляем w,h из текущего конфига и пересчитываем layout
-                const newW = this.sys.game.config.width;
-                const newH = this.sys.game.config.height;
-                // пересчитаем просто вызовом finalize — он возьмёт текущие размеры natively
-                finalizeVideoLayout.call(this);
-            } catch (e) {}
-        };
-        this.scale.on('resize', this._endingResizeHandler);
-    } catch (e) {}
 }
 
 function createEndingPlayButton(displayW, displayH) {
     const w = this.sys.game.config.width; const h = this.sys.game.config.height;
-    try { if (endingPlayButton) endingPlayButton.destroy(); } catch (e) {}
-    const panel = this.add.rectangle(w/2, h/2 + (displayH ? displayH/2 : 0) + 36, 420, 72, 0x000000, 0.7).setOrigin(0.5).setScrollFactor(0).setDepth(1200);
-    const btnText = this.add.text(w/2, h/2 + (displayH ? displayH/2 : 0) + 36, "Click to play cutscene with sound", { fontSize: '22px', color: '#ffffff', fontStyle: 'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(1201);
+    try { if (endingPlayButton) endingPlayButton.destroy(); } catch(e){}
+    const panel = this.add.rectangle(w/2, h/2 + displayH/2 + 36, 480, 72, 0x000000, 0.7).setOrigin(0.5).setScrollFactor(0).setDepth(1200);
+    const btnText = this.add.text(w/2, h/2 + displayH/2 + 36, "Click to play cutscene with sound", { fontSize: '22px', color: '#ffffff', fontStyle: 'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(1201);
     btnText.setInteractive({ useHandCursor: true });
-    panel.setInteractive(new Phaser.Geom.Rectangle(-210, -36, 420, 72), Phaser.Geom.Rectangle.Contains);
+    panel.setInteractive(new Phaser.Geom.Rectangle(-240, -36, 480, 72), Phaser.Geom.Rectangle.Contains);
     endingPlayButton = this.add.container(0,0,[panel, btnText]).setDepth(1200);
+
     const startWithSound = () => {
-        try { endingPlayButton.list.forEach(i => i.disableInteractive && i.disableInteractive()); } catch (e){}
+        try { endingPlayButton.list.forEach(i => i.disableInteractive && i.disableInteractive()); } catch(e){}
         this.input.enabled = false;
         try { if (endingVideo && endingVideo.video) { endingVideo.video.muted = false; try { endingVideo.video.volume = 1.0; } catch(e){} } } catch(e){}
         try {
             const p = endingVideo.play(false);
             if (p && typeof p.then === 'function') {
-                p.then(()=>{ try{ endingPlayButton.destroy(); endingPlayButton = null; } catch(e){} })
-                 .catch(()=>{ this.input.enabled = true; try{ if (endingPlayButton) endingPlayButton.list.forEach(i => i.setInteractive && i.setInteractive()); } catch(e){} });
+                p.then(()=>{ try{ endingPlayButton.destroy(); endingPlayButton = null; } catch(e){} }).catch(()=>{ this.input.enabled = true; try{ if (endingPlayButton) endingPlayButton.list.forEach(i => i.setInteractive && i.setInteractive()); } catch(e){} });
             } else { try{ endingPlayButton.destroy(); endingPlayButton = null; } catch(e){} }
         } catch(e){ this.input.enabled = true; try{ if (endingPlayButton) endingPlayButton.list.forEach(i => i.setInteractive && i.setInteractive()); } catch(e){} }
     };
     panel.on('pointerdown', startWithSound); btnText.on('pointerdown', startWithSound);
 }
-
-function createEndingUnmuteButton() {
-    // Показываем тонкую кнопку, чтобы пользователь мог включить звук если autoplay прошёл в muted
-    const w = this.sys.game.config.width; const h = this.sys.game.config.height;
-    try { if (endingUnmuteButton) endingUnmuteButton.destroy(); } catch (e) {}
-    const panel = this.add.rectangle(w - 120, 50, 200, 48, 0x000000, 0.6).setOrigin(0.5).setScrollFactor(0).setDepth(1205);
-    const btnText = this.add.text(w - 120, 50, "Unmute cutscene", { fontSize: '18px', color: '#ffffff' }).setOrigin(0.5).setScrollFactor(0).setDepth(1206);
-    panel.setInteractive(new Phaser.Geom.Rectangle(-100, -24, 200, 48), Phaser.Geom.Rectangle.Contains);
-    btnText.setInteractive({ useHandCursor: true });
-    endingUnmuteButton = this.add.container(0,0,[panel, btnText]).setDepth(1205);
-    const doUnmute = () => {
-        try { if (endingVideo && endingVideo.video) { endingVideo.video.muted = false; try { endingVideo.video.volume = 1.0; } catch(e){} } } catch(e){}
-        try { endingUnmuteButton.destroy(); endingUnmuteButton = null; } catch(e){}
-    };
-    panel.on('pointerdown', doUnmute); btnText.on('pointerdown', doUnmute);
-}
-
 function onEndingVideoComplete() {
-    try { if (endingVideo) { endingVideo.stop(); endingVideo.destroy(); } } catch (e) {}
-    try { if (endingLeftBar) endingLeftBar.destroy(); } catch (e) {}
-    try { if (endingRightBar) endingRightBar.destroy(); } catch (e) {}
-    try { if (endingPlayButton) { endingPlayButton.destroy(); endingPlayButton = null; } } catch (e) {}
-    try { if (endingUnmuteButton) { endingUnmuteButton.destroy(); endingUnmuteButton = null; } } catch (e) {}
-
+    try { if (endingVideo) { endingVideo.stop(); endingVideo.destroy(); } } catch(e){}
+    try { if (endingLeftBar) endingLeftBar.destroy(); } catch(e){}
+    try { if (endingRightBar) endingRightBar.destroy(); } catch(e){}
     endingVideo = null; endingLeftBar = null; endingRightBar = null;
+    try { if (endingPlayButton) { endingPlayButton.destroy(); endingPlayButton = null; } } catch(e){}
     const w = this.sys.game.config.width; const h = this.sys.game.config.height;
     endingOverlay = this.add.rectangle(0,0,w,h,0x000000,0.6).setOrigin(0,0).setScrollFactor(0).setDepth(1100);
     restartPrompt = this.add.text(w/2, h/2, "Press - ANY KEY - to restart", { fontSize:'48px', color:'#ffffff', fontStyle:'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(1110);
     restartMode = true; this.input.enabled = true;
     this.input.keyboard.once('keydown', ()=>{ resetGame.call(this); });
-
-    // убираем ресайз-хэндлер если он был
-    try {
-        if (this._endingResizeHandler) {
-            try { this.scale.off('resize', this._endingResizeHandler); } catch (e) {}
-            this._endingResizeHandler = null;
-        }
-    } catch (e) {}
 }
 
-// --- остальные игровые функции (без изменений) ---
 function tryGrabZombie() {
     let radius = 220;
     zombies.children.iterate((zombie) => {
@@ -928,9 +856,17 @@ function resetGame() {
     // сброс положения генерации земли и камера
     lastGroundX = 0;
     try { this.cameras.main.setScroll(0, 0); this.cameras.main.scrollX = 0; } catch (e) {}
-50
+
     try { this.physics.world.resume(); } catch(e){}
     try { if (sounds.theme && sounds.theme.isPlaying) sounds.theme.stop(); } catch(e){}
+
+    // если есть открытое видео, убрать его
+    try { if (endingVideo) { endingVideo.stop(); endingVideo.destroy(); endingVideo = null; } } catch(e){}
+    try { if (endingLeftBar) endingLeftBar.destroy(); } catch(e){}
+    try { if (endingRightBar) endingRightBar.destroy(); } catch(e){}
+    try { if (endingPlayButton) endingPlayButton.destroy(); endingPlayButton = null; } catch(e){}
+    try { if (endingOverlay) endingOverlay.destroy(); endingOverlay = null; } catch(e){}
+    try { if (restartPrompt) restartPrompt.destroy(); restartPrompt = null; } catch(e){}
 
     // Перезапускаем сцену
     this.scene.restart();
