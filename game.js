@@ -580,50 +580,155 @@ function startFinalRun() {
     princess.setVelocityX(Math.abs(Math.max(BASE_PLAYER_SPEED, 220)));
 }
 
-// --- ending cutscene (unchanged except theme handling already done on final trigger) ---
+// --- ending cutscene: улучшенная и стабильная подгонка видео для GitHub Pages и разных браузеров ---
 function startEndingCutscene() {
     cutscenePlaying = true; stopCamera = true; generateGround = false;
     try { this.physics.world.pause(); } catch (e) {}
     try { if (sounds.theme && sounds.theme.isPlaying) sounds.theme.stop(); } catch (e) {}
     const w = this.sys.game.config.width; const h = this.sys.game.config.height;
     try { if (endingPlayButton) { endingPlayButton.destroy(); endingPlayButton = null; } } catch (e) {}
-    endingVideo = this.add.video(w/2, h/2, 'ending').setScrollFactor(0).setDepth(1001);
+
+    // создаём Phaser Video и сразу ставим origin=center для корректного позиционирования
+    endingVideo = this.add.video(w/2, h/2, 'ending').setScrollFactor(0).setDepth(1001).setOrigin(0.5, 0.5);
+
+    // Попытаемся получить нативный video элемент
     let nativeVideo = null;
-    try { nativeVideo = endingVideo.video; if (nativeVideo) { nativeVideo.muted = false; try { nativeVideo.volume = 1.0; } catch(e){} } } catch(e){ nativeVideo = null; }
+    try { nativeVideo = endingVideo.video; } catch (e) { nativeVideo = null; }
+
+    // временный затемняющий слой пока ждём метаданные
     const tempOverlay = this.add.rectangle(0,0,w,h,0x000000,0.85).setOrigin(0,0).setScrollFactor(0).setDepth(1000);
+
+    // finalizeVideoLayout: вычисляет правильный display size и запускает видео.
     const finalizeVideoLayout = () => {
-        let vidW = 1072, vidH = 720;
-        try { if (nativeVideo && nativeVideo.videoWidth && nativeVideo.videoHeight) { vidW = nativeVideo.videoWidth; vidH = nativeVideo.videoHeight; } } catch(e){}
-        const maxW = Math.min(1072, w); const maxH = Math.min(720, h);
-        const scale = Math.min(maxW/vidW, maxH/vidH);
-        const displayW = Math.round(vidW*scale); const displayH = Math.round(vidH*scale);
-        endingVideo.setDisplaySize(displayW, displayH); endingVideo.setPosition(w/2, h/2);
+        // получаем нативные размеры видео (если есть) или используем разумный fallback
+        let vidW = 1280, vidH = 720;
+        try { 
+            if (nativeVideo && nativeVideo.videoWidth && nativeVideo.videoHeight) { 
+                vidW = nativeVideo.videoWidth; 
+                vidH = nativeVideo.videoHeight; 
+            } else if (endingVideo && endingVideo.width && endingVideo.height) {
+                // fallback: Phaser Video texture размер (реже работает)
+                vidW = endingVideo.width || vidW;
+                vidH = endingVideo.height || vidH;
+            }
+        } catch(e){}
+
+        // максимально разрешение занимаемого пространства — не больше канваса
+        const maxW = Math.min(vidW, w);
+        const maxH = Math.min(vidH, h);
+
+        // масштабируем, сохраняя соотношение (contain)
+        const scale = Math.min(maxW / vidW, maxH / vidH, 1);
+        const displayW = Math.round(vidW * scale);
+        const displayH = Math.round(vidH * scale);
+
+        // применяем к Phaser Video
+        try {
+            endingVideo.setDisplaySize(displayW, displayH);
+            endingVideo.setPosition(w/2, h/2);
+            endingVideo.setOrigin(0.5, 0.5);
+        } catch(e){}
+
+        // создаём боковые чёрные полосы по необходимости
         try { if (endingLeftBar) endingLeftBar.destroy(); } catch(e){}
         try { if (endingRightBar) endingRightBar.destroy(); } catch(e){}
-        const pad = Math.max(0, Math.round((w - displayW)/2));
-        endingLeftBar = this.add.rectangle(0,0,pad,h,0x000000,1).setOrigin(0,0).setScrollFactor(0).setDepth(1000);
-        endingRightBar = this.add.rectangle(w - pad, 0, pad, h, 0x000000, 1).setOrigin(0,0).setScrollFactor(0).setDepth(1000);
-        try { tempOverlay.destroy(); } catch(e){}
-        let playPromise = null;
-        try { playPromise = endingVideo.play(false); } catch(e) { playPromise = null; }
-        if (playPromise && typeof playPromise.then === 'function') {
-            playPromise.then(()=>{ this.input.enabled = false; }).catch(()=>{ createEndingPlayButton.call(this, displayW, displayH); });
+        const pad = Math.max(0, Math.round((w - displayW) / 2));
+        if (pad > 0) {
+            endingLeftBar = this.add.rectangle(0,0,pad,h,0x000000,1).setOrigin(0,0).setScrollFactor(0).setDepth(1000);
+            endingRightBar = this.add.rectangle(w - pad, 0, pad, h, 0x000000, 1).setOrigin(0,0).setScrollFactor(0).setDepth(1000);
         } else {
-            try { if (nativeVideo && nativeVideo.paused) createEndingPlayButton.call(this, displayW, displayH); else this.input.enabled = false; } catch(e) { createEndingPlayButton.call(this, displayW, displayH); }
+            endingLeftBar = null; endingRightBar = null;
         }
-        try { endingVideo.off('complete'); endingVideo.on('complete', ()=>{ onEndingVideoComplete.call(this); }); } catch(e){}
-        try { if (nativeVideo && nativeVideo.addEventListener) { nativeVideo.removeEventListener('ended', onEndingVideoCompleteWrapper); nativeVideo.addEventListener('ended', onEndingVideoCompleteWrapperOnce.bind(this), { once: true }); } } catch(e){}
+
+        // если есть нативный элемент — ставим object-fit: contain и подгоняем стили (это фикс для GitHub Pages/браузеров)
+        try {
+            if (nativeVideo && nativeVideo.style) {
+                nativeVideo.style.objectFit = 'contain';
+                nativeVideo.style.width = displayW + 'px';
+                nativeVideo.style.height = displayH + 'px';
+                nativeVideo.style.maxWidth = '100%';
+                nativeVideo.style.maxHeight = '100%';
+                nativeVideo.style.position = 'absolute';
+                nativeVideo.style.left = Math.round((w - displayW) / 2) + 'px';
+                nativeVideo.style.top = Math.round((h - displayH) / 2) + 'px';
+                nativeVideo.style.margin = '0';
+                nativeVideo.style.padding = '0';
+                // отключаем poster/controls чтобы не мешали
+                try { nativeVideo.controls = false; } catch(e){}
+            }
+        } catch(e){}
+
+        // удаляем временный overlay (уже не нужен)
+        try { tempOverlay.destroy(); } catch(e){}
+
+        // пробуем воспроизвести: ưuник — сначала пробуем нативный play (чтобы браузер корректно применил стили)
+        let playPromise = null;
+        try {
+            if (nativeVideo && typeof nativeVideo.play === 'function') {
+                playPromise = nativeVideo.play();
+            } else {
+                playPromise = endingVideo.play(false);
+            }
+        } catch(e){ playPromise = null; }
+
+        // если play вернул promise — обрабатываем результат; если отказ — показываем кнопку "Click to play"
+        if (playPromise && typeof playPromise.then === 'function') {
+            playPromise.then(() => {
+                // успешно начал воспроизведение — блокируем ввод на время видео
+                try { this.input.enabled = false; } catch(e){}
+            }).catch(() => {
+                // autoplay запретили — показываем кнопку
+                createEndingPlayButton.call(this, displayW, displayH);
+            });
+        } else {
+            // если браузер не вернул promise — проверяем нативный paused
+            try {
+                if (nativeVideo && nativeVideo.paused) {
+                    createEndingPlayButton.call(this, displayW, displayH);
+                } else {
+                    try { this.input.enabled = false; } catch(e){}
+                }
+            } catch(e){
+                createEndingPlayButton.call(this, displayW, displayH);
+            }
+        }
+
+        // подписка на конец видео
+        try {
+            // remove previous handlers if были
+            if (nativeVideo && nativeVideo.addEventListener) {
+                nativeVideo.removeEventListener('ended', onEndingVideoCompleteNative);
+                nativeVideo.addEventListener('ended', onEndingVideoCompleteNative);
+            }
+        } catch(e){}
+        try {
+            endingVideo.off && endingVideo.off('complete');
+            endingVideo.on && endingVideo.on('complete', ()=>{ onEndingVideoComplete.call(this); });
+        } catch(e){}
     };
-    function onEndingVideoCompleteWrapper(){}
-    function onEndingVideoCompleteWrapperOnce(){ onEndingVideoComplete.call(this); }
+
+    // wrapper для нативного ended
+    function onEndingVideoCompleteNative() { onEndingVideoComplete.call(this); }
+
+    // если уже есть metadata — finalize сразу, иначе ждём loadedmetadata
     try {
-        if (nativeVideo && nativeVideo.readyState >= 1 && nativeVideo.videoWidth && nativeVideo.videoHeight) finalizeVideoLayout.call(this);
-        else if (nativeVideo && nativeVideo.addEventListener) {
-            nativeVideo.addEventListener('loadedmetadata', ()=>{ finalizeVideoLayout.call(this); }, { once: true });
-            this.time.delayedCall(500, ()=>{ try { if (endingVideo && endingVideo.video && endingVideo.video.videoWidth) finalizeVideoLayout.call(this); } catch(e){ finalizeVideoLayout.call(this); } });
-        } else this.time.delayedCall(100, ()=> finalizeVideoLayout.call(this));
-    } catch(e){ this.time.delayedCall(100, ()=> finalizeVideoLayout.call(this)); }
+        if (nativeVideo && nativeVideo.readyState >= 1 && nativeVideo.videoWidth && nativeVideo.videoHeight) {
+            finalizeVideoLayout.call(this);
+        } else if (nativeVideo && nativeVideo.addEventListener) {
+            const boundFinalize = finalizeVideoLayout.bind(this);
+            nativeVideo.addEventListener('loadedmetadata', function onLM(){ try { nativeVideo.removeEventListener('loadedmetadata', onLM); } catch(e){}; boundFinalize(); }, { once: true });
+            // safety fallback: через 600ms попытаемся ещё раз
+            this.time.delayedCall(600, ()=>{ try { finalizeVideoLayout.call(this); } catch(e){ } });
+        } else {
+            // нет доступа к нативному элементу — просто попытка через таймаут
+            this.time.delayedCall(150, ()=> finalizeVideoLayout.call(this));
+        }
+    } catch(e){
+        // на всякий случай — через 200ms
+        this.time.delayedCall(200, ()=> finalizeVideoLayout.call(this));
+    }
 }
+
 function createEndingPlayButton(displayW, displayH) {
     const w = this.sys.game.config.width; const h = this.sys.game.config.height;
     try { if (endingPlayButton) endingPlayButton.destroy(); } catch(e){}
@@ -632,21 +737,40 @@ function createEndingPlayButton(displayW, displayH) {
     btnText.setInteractive({ useHandCursor: true });
     panel.setInteractive(new Phaser.Geom.Rectangle(-210, -36, 420, 72), Phaser.Geom.Rectangle.Contains);
     endingPlayButton = this.add.container(0,0,[panel, btnText]).setDepth(1200);
+
     const startWithSound = () => {
         try { endingPlayButton.list.forEach(i => i.disableInteractive && i.disableInteractive()); } catch(e){}
         this.input.enabled = false;
-        try { if (endingVideo && endingVideo.video) { endingVideo.video.muted = false; try { endingVideo.video.volume = 1.0; } catch(e){} } } catch(e){}
         try {
-            const p = endingVideo.play(false);
+            // пытаемся напрямую у нативного элемента снять mute и запустить
+            if (endingVideo && endingVideo.video) {
+                try { endingVideo.video.muted = false; } catch(e){}
+                try { endingVideo.video.volume = 1.0; } catch(e){}
+            }
+        } catch(e){}
+        try {
+            // лучше запустить нативное play, если есть
+            let p = null;
+            if (endingVideo && endingVideo.video && typeof endingVideo.video.play === 'function') {
+                p = endingVideo.video.play();
+            } else {
+                p = endingVideo.play(false);
+            }
             if (p && typeof p.then === 'function') {
                 p.then(()=>{ try{ endingPlayButton.destroy(); endingPlayButton = null; } catch(e){} }).catch(()=>{ this.input.enabled = true; try{ if (endingPlayButton) endingPlayButton.list.forEach(i => i.setInteractive && i.setInteractive()); } catch(e){} });
-            } else { try{ endingPlayButton.destroy(); endingPlayButton = null; } catch(e){} }
-        } catch(e){ this.input.enabled = true; try{ if (endingPlayButton) endingPlayButton.list.forEach(i => i.setInteractive && i.setInteractive()); } catch(e){} }
+            } else {
+                try{ endingPlayButton.destroy(); endingPlayButton = null; } catch(e){}
+            }
+        } catch(e){
+            this.input.enabled = true; 
+            try{ if (endingPlayButton) endingPlayButton.list.forEach(i => i.setInteractive && i.setInteractive()); } catch(e){}
+        }
     };
     panel.on('pointerdown', startWithSound); btnText.on('pointerdown', startWithSound);
 }
+
 function onEndingVideoComplete() {
-    try { if (endingVideo) { endingVideo.stop(); endingVideo.destroy(); } } catch(e){}
+    try { if (endingVideo) { endingVideo.stop && endingVideo.stop(); endingVideo.destroy && endingVideo.destroy(); } } catch(e){}
     try { if (endingLeftBar) endingLeftBar.destroy(); } catch(e){}
     try { if (endingRightBar) endingRightBar.destroy(); } catch(e){}
     endingVideo = null; endingLeftBar = null; endingRightBar = null;
