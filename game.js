@@ -562,12 +562,12 @@ function update(time, delta) {
 
 // --- rest of functions: checkLevelTransition, completeLevelTransition, startFinalRun (unchanged) ---
 function checkLevelTransition() {
-    if (level < 5 && levelScore >= 80 && !levelTransition) {
+    if (level < 5 && levelScore >= 10 && !levelTransition) {
         levelTransition = true; generateGround = false;
         const startX = lastGroundX; const elevatedY = groundLevelY - LEVEL_STEP; const nextLevel = Math.min(5, level + 1);
         for (let i = 0; i < PLATFORM_LENGTH; i++) { const x = startX + i * TILE_WIDTH; createGroundTile.call(this, x, elevatedY, nextLevel); }
     }
-    if (level === 5 && levelScore >= 50 && !finalRun) startFinalRun.call(this);
+    if (level === 5 && levelScore >= 10 && !finalRun) startFinalRun.call(this);
 }
 function completeLevelTransition(newY) {
     groundLevelY = newY; level++; levelScore = 0; updateScoreText.call(this);
@@ -928,7 +928,7 @@ function resetGame() {
     // сброс положения генерации земли и камера
     lastGroundX = 0;
     try { this.cameras.main.setScroll(0, 0); this.cameras.main.scrollX = 0; } catch (e) {}
-
+50
     try { this.physics.world.resume(); } catch(e){}
     try { if (sounds.theme && sounds.theme.isPlaying) sounds.theme.stop(); } catch(e){}
 
